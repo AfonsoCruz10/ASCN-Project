@@ -1,0 +1,8 @@
+---
+
+- name: Undeploy Laravel.io
+  hosts: localhost
+  roles:
+    - undeploy_laravelio
+    - role: undeploy_mysql
+      when: "delete_data is defined and delete_data == 'true'"

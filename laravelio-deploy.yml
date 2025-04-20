@@ -1,0 +1,12 @@
+---
+
+- name: Deploy laravel.io
+  hosts: localhost
+  roles: 
+    - create_secrets
+    - deploy_mysql
+    - deploy_laravelio
+    - role: seed_db
+      when: "seed_database is defined and seed_database == 'true'"
+    - role: monitoring
+      when: "monitoring is defined and monitoring == 'true'"

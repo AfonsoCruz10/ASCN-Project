@@ -1,0 +1,169 @@
+---
+- name: Create GCP address
+  google.cloud.gcp_compute_address:
+    name: laravelio-address
+    region: "{{ gcp_region }}"
+    project: "{{ gcp_project }}"
+    auth_kind: "{{ gcp_auth_kind }}"
+    service_account_file: "{{ gcp_cred_file }}"
+    state: present
+  register: laravelio_address
+
+- name: Update GCP variables
+  set_fact:
+    laravelio_ip: "{{ laravelio_address.address }}"
+    laravelio_port: "{{ laravelio_container_port }}"
+
+- name: Authorize port Laravel.io Port
+  google.cloud.gcp_compute_firewall:
+    name: allow-port
+    project: "{{ gcp_project }}"
+    auth_kind: "{{ gcp_auth_kind }}"
+    service_account_file: "{{ gcp_cred_file }}"
+    network: 
+      name: default
+    allowed:
+      - ip_protocol: tcp
+        ports: "{{ app_port }}"
+    source_ranges:
+      - "0.0.0.0/0"
+    state: present
+
+- name: Create namespace for project 
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ namespace }}"
+        labels:
+          app: "{{ namespace }}"
+
+- name: Create Laravel.io deployment
+  kubernetes.core.k8s:
+    state: present
+    definition: 
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: laravelio-deployment
+        namespace: "{{ namespace }}"
+        labels: 
+          app: laravelio
+          tier: laravelio
+      spec:
+        selector: 
+          matchLabels:
+            app: laravelio
+        strategy: 
+          type: Recreate
+        template:
+          metadata:
+            labels:
+              app: laravelio
+              tier: laravelio
+          spec:
+            containers:
+              - name: laravelio
+                image: "{{ laravelio_image }}"
+                env:
+                - name: DB_HOST
+                  value: "{{ database_service }}"
+                - name: DB_DATABASE
+                  value: "{{ database_name }}"
+                - name: DB_USERNAME
+                  value: "{{ database_user }}"
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: laravelio-secret-data
+                      key: database_password
+                - name: MIGRATE
+                  value: "true"
+                resources:
+                  requests:
+                    memory: "256Mi"
+                    cpu: "100m"
+                ports:
+                  - containerPort: "{{ laravelio_container_port }}"
+                    port: "{{ laravelio_port }}"
+
+- name: Create Laravel.io Service
+  kubernetes.core.k8s:
+    state: present
+    definition:   
+      apiVersion: v1
+      kind: Service
+      metadata: 
+        name: laravelio-service
+        namespace: "{{ namespace }}"
+        labels:
+          app: laravelio
+      spec:
+        type: NodePort
+        selector:
+          app: laravelio
+        ports:
+          - targetPort: "{{ laravelio_container_port }}" # Port that containers are listening on
+            port: "{{ laravelio_port }}" # Port that's exposed internally in the cluster
+            nodePort: "{{ app_port }}" # External port
+            
+- name: Wait for database pod to become ready
+  shell: "kubectl wait --namespace={{ namespace }} --for=condition=Ready pods --selector tier=database --timeout=600s"
+
+- name: Wait for Laravel.io pod to become ready
+  shell: "kubectl wait --namespace={{ namespace }} --for=condition=Ready pods --selector tier=laravelio --timeout=600s"
+
+- name: Get node name for Laravel.io service
+  shell: "kubectl get pods -n {{ namespace }} -l app=laravelio -o jsonpath='{.items[0].spec.nodeName}'"
+  register: laravelio_node
+
+- name: Get external IP of the node
+  shell: "kubectl get node {{ laravelio_node.stdout }} -o jsonpath='{.status.addresses[?(@.type==\"ExternalIP\")].address}'"
+  register: laravelio_node_ip
+
+- name: Set Laravel.io service external IP fact
+  set_fact:
+    laravelio_service_ip: "{{ laravelio_node_ip.stdout }}"
+    app_ip: "{{ laravelio_node_ip.stdout }}"
+
+- name: Update inventory file with app_ip
+  ansible.builtin.lineinfile:
+    path: inventory/gcp.yml 
+    regexp: '^  app_ip:'
+    line: '  app_ip: "{{ laravelio_service_ip }}"'
+
+- name: Print inventory file
+  ansible.builtin.debug:
+    msg: "{{ lookup('file', 'inventory/gcp.yml') }}"
+
+- name: Create Horizontal Pod Autoscaler for Laravel.io
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: laravelio-hpa
+        namespace: "{{ namespace }}"
+      spec:
+        scaleTargetRef:
+          apiVersion: apps/v1
+          kind: Deployment
+          name: laravelio-deployment
+        minReplicas: 1
+        maxReplicas: 5
+        metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+        - type: Resource
+          resource:
+            name: memory
+            target:
+              type: Utilization
+              averageUtilization: 70

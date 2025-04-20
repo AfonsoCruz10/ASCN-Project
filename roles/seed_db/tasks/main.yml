@@ -1,0 +1,15 @@
+---
+- name: Wait for Laravel.io pod to become ready
+  shell: "kubectl wait --namespace={{ namespace }} --for=condition=Ready pods --selector tier=laravelio --timeout=600s"
+  
+- name: Get Laravel.io pod name
+  command: "kubectl get pod -n {{ namespace }} -l app=laravelio -o jsonpath='{.items[0].metadata.name}'"
+  register: pod_name
+
+- name: Get Laravel.io container name
+  command: "kubectl get pod -n {{ namespace }} {{ pod_name.stdout }} -o jsonpath='{.spec.containers[0].name}'"
+  register: container_name
+
+- name: Seed Laravel.io DB
+  command: "kubectl exec -it -n {{ namespace }} {{ pod_name.stdout }} -c {{ container_name.stdout }} -- /bin/sh -c 'php artisan db:seed'"
+  when: seed_database | bool | default(false) 

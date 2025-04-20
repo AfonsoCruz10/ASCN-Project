@@ -1,0 +1,12 @@
+---
+- name: Delete Laravel.io Deployment
+  shell: kubectl delete deployment laravelio-deployment
+  ignore_errors: true
+    
+- name: Delete Laravel.io Service
+  shell: kubectl delete service laravelio-service
+  ignore_errors: true
+
+- name: Delete Horizontal Pod Autoscaler
+  shell: kubectl delete hpa laravelio-hpa
+  ignore_errors: true
